@@ -22,7 +22,7 @@ struct STRC
 
 // === Function Prototypes ===
 static void processFunction(func_t *pFunc);
-static void filterWhitespace(LPSTR pszString);
+static void filterWhitespace(qstring &pszString);
 
 // === Data ===
 static ALIGN(16) STRC aString[MAX_LINE_STR_COUNT];
@@ -39,7 +39,6 @@ static const char mainDialog[] =
     #endif
 	"Extracts strings from each function and intelligently adds them  \nto the function comment line.\n\n"
     "Version %Aby Sirmabus\n"
-    "<#Click to open site.#www.macromonkey.com:k:1:1::>\n\n"
 
 	" \n\n\n\n\n"
 };
@@ -58,20 +57,18 @@ void CORE_Exit()
 {
 }
 
-static void idaapi doHyperlink(TView *fields[], int code) { open_url("http://www.macromonkey.com/bb/"); }
-
 // Plug-in process
-void CORE_Process(int iArg)
+void CORE_Process(size_t iArg)
 {
     try
     {
         char version[16];
         sprintf(version, "%u.%u", HIBYTE(MY_VERSION), LOBYTE(MY_VERSION));
         msg("\n>> Function String Associate: v: %s, built: %s, By Sirmabus\n", version, __DATE__);
-        if (autoIsOk())
+        if (auto_is_ok())
         {
             refreshUI();
-            int iUIResult = AskUsingForm_c(mainDialog, version, doHyperlink);
+            int iUIResult = ask_form(mainDialog, version);
             if (!iUIResult)
             {
                 msg(" - Canceled -\n");
@@ -116,38 +113,18 @@ void CORE_Process(int iArg)
 
 
 // Remove whitespace & illegal chars from input string
-static void filterWhitespace(LPSTR pstr)
+static void filterWhitespace(qstring &pstr)
 {
-	LPSTR ps = pstr;
-	while(*ps)
-	{
-		// Replace unwanted chars with a space char
-		char c = *ps;
-		if((c < ' ') || (c > '~'))
-			*ps = ' ';
-
-		ps++;
-	};
+    for (auto &c : pstr) {
+        if (c < ' ' || c > '~')
+            c = ' ';
+    }
 
 	// Trim any starting space(s)
-	ps = pstr;
-	while(*ps)
-	{
-		if(*ps == ' ')
-	        memmove(ps, ps+1, strlen(ps));
-		else
-			break;
-	};
+    pstr.ltrim();
 
 	// Trim any trailing space
-	ps = (pstr + (strlen(pstr) - 1));
-	while(ps >= pstr)
-	{
-		if(*ps == ' ')
-			*ps-- = 0;
-		else
-			break;
-	};
+    pstr.rtrim();
 }
 
 static int __cdecl compare(const void *a, const void *b)
@@ -168,22 +145,18 @@ static void processFunction(func_t *f)
 		// Skip if it already has type comment
 		// TODO: Could have option to just skip comment if one already exists?
 		BOOL skip = FALSE;
-		LPSTR tempComment = get_func_cmt(f, true);
-		if(!tempComment)
-			get_func_cmt(f, false);
-
-		if(tempComment)
+        qstring tempComment;
+        if ((get_func_cmt(&tempComment, f, true) > 0 || get_func_cmt(&tempComment, f, false)) && !tempComment.empty())
 		{
 			// Ignore common auto-generated comments
-            if (strncmp(tempComment, "Microsoft VisualC ", SIZESTR("Microsoft VisualC ")) != 0)
+            if (tempComment.compare("Microsoft VisualC ") != 0)
             {
-                if (strstr(tempComment, "\ndoubtful name") == NULL)
+                if (strstr(tempComment.c_str(), "\ndoubtful name") == NULL)
                     skip = TRUE;
             }
 
             //if (skip)
             //    msg(EAFORMAT" c: \"%s\"\n", f->startEA, tempComment);
-			qfree(tempComment);
 		}
 
 		// TODO: Add option to append to existing comments?
@@ -198,50 +171,45 @@ static void processFunction(func_t *f)
 		    {
 			    // Has an xref?
                 ea_t currentEA = it.current();
-			    xrefblk_t xb;
+                xrefblk_t xb;
 			    if(xb.first_from(currentEA, XREF_DATA))
 			    {
 				    // A string (ASCII, Unicode, etc.)?
-				    flags_t flags = get_flags_novalue(xb.to);
-                    if (isASCII(flags))
+				    flags_t flags = get_flags(xb.to);
+                    if (is_strlit(flags))
                     {
                         // Get the string
-                        char buffer[MAX_LABEL_STR]; buffer[SIZESTR(buffer)] = 0;
-                        int len = get_max_ascii_length(xb.to, ASCSTR_C, ALOPT_IGNHEADS);
-                        if (len > (MIN_STR_SIZE + 1))
+                        qstring buffer;
+                        if (get_strlit_contents(&buffer, xb.to, -1, STRTYPE_C) > -1)
                         {
-                            get_ascii_contents2(xb.to, len, ASCSTR_C, buffer, SIZESTR(buffer));
-                            if (buffer[0])
+                            // Clean it up
+                            filterWhitespace(buffer);
+
+                            // If it's not tiny continue
+                            if (buffer.length() >= MIN_STR_SIZE)
                             {
-                                // Clean it up
-                                filterWhitespace(buffer);
-
-                                // If it's not tiny continue
-                                if (strlen(buffer) >= MIN_STR_SIZE)
+                                // If already in the list, just update it's ref count
+                                BOOL skip = FALSE;
+                                for (UINT j = 0; j < nStr; j++)
                                 {
-                                    // If already in the list, just update it's ref count
-                                    BOOL skip = FALSE;
-                                    for (UINT j = 0; j < nStr; j++)
+                                    if (buffer.compare(aString[j].str) == 0)
                                     {
-                                        if (strcmp(aString[j].str, buffer) == 0)
-                                        {
-                                            aString[j].refs++;
-                                            skip = TRUE;
-                                            break;
-                                        }
+                                        aString[j].refs++;
+                                        skip = TRUE;
+                                        break;
                                     }
+                                }
 
-                                    if (!skip)
-                                    {
-                                        // Add it to the list
-                                        strcpy(aString[nStr].str, buffer);
-                                        aString[nStr].refs = 1;
-                                        ++nStr;
+                                if (!skip)
+                                {
+                                    // Add it to the list
+                                    strcpy(aString[nStr].str, buffer.c_str());
+                                    aString[nStr].refs = 1;
+                                    ++nStr;
 
-                                        // Bail out if we have max string count
-                                        if (nStr >= MAX_LINE_STR_COUNT)
-                                            break;
-                                    }
+                                    // Bail out if we have max string count
+                                    if (nStr >= MAX_LINE_STR_COUNT)
+                                        break;
                                 }
                             }
                         }
@@ -285,7 +253,6 @@ static void processFunction(func_t *f)
 
 				// Add/replace comment
                 //msg(EAFORMAT" %u\n", f->startEA, nStr);
-				del_func_cmt(f, true); del_func_cmt(f, false);
 				set_func_cmt(f, comment, true);
 				commentCount++;
 			}
